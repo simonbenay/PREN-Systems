@@ -1,0 +1,6 @@
+.vscode/
+infra/.venv/
+infra/cdk.out/
+**/__pycache__/
+*.pyc
+.DS_Store

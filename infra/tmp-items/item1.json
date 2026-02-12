@@ -1,0 +1,10 @@
+{
+  "iris_id": {"S":"PARIS_DEMO_1"},
+  "city": {"S":"Paris"},
+  "future_value_score": {"N":"0.82"},
+  "momentum": {"S":"High"},
+  "confidence": {"N":"0.74"},
+  "data_freshness_days": {"N":"12"},
+  "top_signals": {"S":"Permis en hausse | Nouveaux equipements | Hausse densite commerces"},
+  "updated_at": {"S":"2026-02-12"}
+}
