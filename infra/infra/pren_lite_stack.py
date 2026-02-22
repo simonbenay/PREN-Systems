@@ -151,6 +151,36 @@ class PrenLiteStack(Stack):
         # Grant read permissions
         scores_table.grant_read_data(health_handler)
 
+        # Textract handler
+        textract_handler = lambda_.Function(
+            self, "TextractHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="textract_handler.handler",
+            code=lambda_.Code.from_asset("infra/lambda"),
+            timeout=Duration.seconds(60),
+            memory_size=512,
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            environment={
+                "RAW_BUCKET": raw_bucket.bucket_name,
+                "SIGNALS_TABLE": signals_table.table_name
+            }
+        )
+
+        # Permissions Textract
+        textract_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "textract:DetectDocumentText",
+                    "textract:AnalyzeDocument",
+                    "textract:StartDocumentTextDetection",
+                    "textract:GetDocumentTextDetection"
+                ],
+                resources=["*"]
+            )
+        )
+        raw_bucket.grant_read(textract_handler)
+        signals_table.grant_write_data(textract_handler)
+
         # 4) API Gateway HTTP API
         http_api = apigwv2.HttpApi(
             self, "PrenHttpApi",
@@ -217,27 +247,60 @@ class PrenLiteStack(Stack):
         Tags.of(api_5xx_alarm).add("City", "Paris")
         Tags.of(api_5xx_alarm).add("Env", "dev")
 
-        # 6) Step Functions State Machine
-        # ValidateInput task
-        validate_input_task = tasks.LambdaInvoke(
-            self, "ValidateInput",
-            lambda_function=ingest_handler,
+        # Bedrock handler
+        bedrock_handler = lambda_.Function(
+            self, "BedrockHandler",
+            runtime=lambda_.Runtime.PYTHON_3_11,
+            handler="bedrock_handler.handler",
+            code=lambda_.Code.from_asset("infra/lambda"),
+            timeout=Duration.seconds(120),
+            memory_size=512,
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            environment={
+                "SIGNALS_TABLE": signals_table.table_name,
+                "BEDROCK_MODEL_ID": "eu.amazon.nova-micro-v1:0"
+            }
+        )
+
+        # Permissions Bedrock
+        bedrock_handler.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel"],
+                resources=[
+                    f"arn:aws:bedrock:eu-west-3::foundation-model/amazon.nova-micro-v1:0",
+                    f"arn:aws:bedrock:*::foundation-model/amazon.nova-micro-v1:0",
+                    f"arn:aws:bedrock:eu-west-3:{self.account}:inference-profile/eu.amazon.nova-micro-v1:0",
+                ]
+            )
+        )
+        signals_table.grant_write_data(bedrock_handler)
+
+        # 6) Step Functions State Machine — Pipeline réel Textract → Bedrock
+        # Étape 1 : extraction Textract
+        textract_task = tasks.LambdaInvoke(
+            self, "ExtractText",
+            lambda_function=textract_handler,
             output_path="$.Payload"
         )
 
-        # StoreSignals pass state
-        store_signals_state = sfn.Pass(
-            self, "StoreSignals",
-            comment="Pass through input"
+        # Étape 2 : structuration Bedrock
+        bedrock_task = tasks.LambdaInvoke(
+            self, "StructureSignals",
+            lambda_function=bedrock_handler,
+            output_path="$.Payload"
         )
 
-        # Define the workflow
-        definition = validate_input_task.next(store_signals_state)
+        # Étape 3 : succès
+        success_state = sfn.Succeed(self, "IngestionComplete")
+
+        # Workflow : Textract → Bedrock → Success
+        definition = textract_task.next(bedrock_task).next(success_state)
 
         state_machine = sfn.StateMachine(
             self, "PrenIngestionStateMachine",
             state_machine_name="PrenIngestionStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(definition),
+            timeout=Duration.minutes(10),
             logs=sfn.LogOptions(
                 destination=logs.LogGroup(
                     self, "StateMachineLogGroup",
@@ -295,4 +358,16 @@ class PrenLiteStack(Stack):
             self, "Api5xxAlarmName",
             value=api_5xx_alarm.alarm_name,
             description="CloudWatch Alarm name for API 5XX errors"
+        )
+
+        CfnOutput(
+            self, "TextractHandlerName",
+            value=textract_handler.function_name,
+            description="Textract Lambda function name"
+        )
+
+        CfnOutput(
+            self, "BedrockHandlerName",
+            value=bedrock_handler.function_name,
+            description="Bedrock Lambda function name"
         )
